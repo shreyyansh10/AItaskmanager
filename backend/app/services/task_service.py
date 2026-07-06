@@ -8,6 +8,7 @@ from app.repository.task_repository import TaskRepository
 from app.services.prompt_service import PromptService
 from app.services.llm_manager import LLMManager, AllProvidersFailedError
 from app.utils.json_parser import clean_and_parse_json, JSONParsingError
+from app.utils.progress_emitter import progress_emitter
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class TaskService:
         self.llm_manager = llm_manager
         self.repository = repository
 
-    async def generate_tasks_from_text(self, source_text: str) -> List[TaskRead]:
+    async def generate_tasks_from_text(self, source_text: str, job_id: Optional[str] = None) -> List[TaskRead]:
         """
         Runs the end-to-end task extraction and validation pipeline.
         
@@ -57,56 +58,69 @@ class TaskService:
         Raises:
             TaskGenerationError: If task extraction fails twice.
         """
+        async def _emit(stage: str):
+            if job_id:
+                await progress_emitter.emit(job_id, stage)
+
         logger.info("TaskService: Starting task generation pipeline")
-        
-        # 1. Compile the prompt
-        prompt = self.prompt_service.build_task_extraction_prompt(source_text)
-        logger.info("TaskService: Task extraction prompt created")
 
-        attempts = 2
-        validated_schema = None
+        try:
+            # 1. Compile the prompt
+            await _emit("Creating Prompt")
+            prompt = self.prompt_service.build_task_extraction_prompt(source_text)
+            logger.info("TaskService: Task extraction prompt created")
 
-        for attempt in range(1, attempts + 1):
-            logger.info(f"TaskService: Attempt {attempt}/{attempts} - Requesting LLM generate tasks")
-            try:
-                # 2. Request LLM generation
-                raw_response = await self.llm_manager.generate(prompt)
-                logger.info(f"TaskService: Attempt {attempt} - Raw text generated successfully")
+            attempts = 2
+            validated_schema = None
 
-                # 3. Clean & Parse JSON
-                parsed_data = clean_and_parse_json(raw_response)
-                logger.info(f"TaskService: Attempt {attempt} - JSON text parsed successfully")
+            for attempt in range(1, attempts + 1):
+                logger.info(f"TaskService: Attempt {attempt}/{attempts} - Requesting LLM generate tasks")
+                try:
+                    # 2. Request LLM generation
+                    await _emit("Calling Provider")
+                    await _emit("Waiting for Response")
+                    raw_response = await self.llm_manager.generate(prompt)
+                    logger.info(f"TaskService: Attempt {attempt} - Raw text generated successfully")
 
-                # 4. Validate against target Pydantic schema
-                validated_schema = TaskGenerationSchema.model_validate(parsed_data)
-                logger.info(f"TaskService: Attempt {attempt} - Pydantic validation successful")
-                break  # Succeeded, exit retry loop
+                    # 3. Clean & Parse JSON
+                    await _emit("Parsing JSON")
+                    parsed_data = clean_and_parse_json(raw_response)
+                    logger.info(f"TaskService: Attempt {attempt} - JSON text parsed successfully")
 
-            except (AllProvidersFailedError, JSONParsingError, ValidationError) as e:
-                logger.warning(
-                    f"TaskService: Attempt {attempt} failed due to {e.__class__.__name__}: {str(e)}"
-                )
-                if attempt < attempts:
-                    logger.info("TaskService: Retrying LLM extraction pipeline once")
-                else:
-                    logger.error("TaskService: Final pipeline attempt failed. Raising TaskGenerationError.")
-                    raise TaskGenerationError(f"Task extraction pipeline failed after {attempts} attempts: {str(e)}") from e
+                    # 4. Validate against target Pydantic schema
+                    await _emit("Validating Output")
+                    validated_schema = TaskGenerationSchema.model_validate(parsed_data)
+                    logger.info(f"TaskService: Attempt {attempt} - Pydantic validation successful")
+                    break  # Succeeded, exit retry loop
 
-        # 5. Persist tasks to the database
-        logger.info("TaskService: Mapping validated JSON schemas to SQLAlchemy ORM models")
-        tasks_to_create = []
-        for task_create in validated_schema.tasks:
-            # Attach the original source text to each task record
-            task_create.source_text = source_text
-            
-            # Map Pydantic model to SQLAlchemy ORM Task model
-            orm_task = Task(**task_create.model_dump())
-            tasks_to_create.append(orm_task)
+                except (AllProvidersFailedError, JSONParsingError, ValidationError) as e:
+                    logger.warning(
+                        f"TaskService: Attempt {attempt} failed due to {e.__class__.__name__}: {str(e)}"
+                    )
+                    if attempt < attempts:
+                        logger.info("TaskService: Retrying LLM extraction pipeline once")
+                    else:
+                        logger.error("TaskService: Final pipeline attempt failed. Raising TaskGenerationError.")
+                        raise TaskGenerationError(f"Task extraction pipeline failed after {attempts} attempts: {str(e)}") from e
 
-        logger.info(f"TaskService: Persisting {len(tasks_to_create)} tasks via TaskRepository")
-        created_tasks = await self.repository.bulk_create(tasks_to_create)
-        logger.info("TaskService: Task extraction and persistence complete")
-        return created_tasks
+            # 5. Persist tasks to the database
+            await _emit("Saving Tasks")
+            logger.info("TaskService: Mapping validated JSON schemas to SQLAlchemy ORM models")
+            tasks_to_create = []
+            for task_create in validated_schema.tasks:
+                task_create.source_text = source_text
+                orm_task = Task(**task_create.model_dump())
+                tasks_to_create.append(orm_task)
+
+            logger.info(f"TaskService: Persisting {len(tasks_to_create)} tasks via TaskRepository")
+            created_tasks = await self.repository.bulk_create(tasks_to_create)
+            logger.info("TaskService: Task extraction and persistence complete")
+            await _emit("Completed")
+            return created_tasks
+
+        except Exception as e:
+            await _emit("Error")
+            raise
 
     # CRUD operations passthroughs
     async def get_task_by_id(self, task_id: int) -> Optional[TaskRead]:
