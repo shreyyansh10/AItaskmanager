@@ -10,6 +10,7 @@ class TaskBase(BaseModel):
     priority: str = Field("Medium", max_length=50, description="Priority level (e.g., High, Medium, Low)")
     status: str = Field("Pending", max_length=50, description="Status of the task")
     source_text: Optional[str] = Field(None, description="Source instruction text")
+    source_hash: Optional[str] = Field(None, max_length=64, description="SHA-256 of normalised source text")
 
 class TaskCreate(TaskBase):
     pass

@@ -35,7 +35,12 @@ class GeminiProvider(LLMProvider):
                 }
             ],
             "generationConfig": {
-                "temperature": 0.0
+                # temperature=0 forces greedy decoding — deterministic output.
+                # topP is set to 1.0 (no nucleus sampling) for the same reason.
+                # Task extraction is structured-data work; identical inputs must
+                # produce identical JSON outputs across runs.
+                "temperature": 0.0,
+                "topP": 1.0,
             }
         }
 

@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 from typing import List, Optional
 from pydantic import ValidationError
@@ -9,132 +11,215 @@ from app.services.prompt_service import PromptService
 from app.services.llm_manager import LLMManager, AllProvidersFailedError
 from app.utils.json_parser import clean_and_parse_json, JSONParsingError
 from app.utils.progress_emitter import progress_emitter
+from app.prompts.action_item_detection_prompt import build_action_item_detection_prompt
+from app.schemas.action_items import ActionItemsResponse
+from app.services.exceptions import ActionItemDetectionError
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_source_hash(text: str) -> str:
+    """SHA-256 hex digest of normalised source text (stripped + lowercased).
+    Normalisation is for hashing only — original casing is preserved in storage.
+    """
+    return hashlib.sha256(text.strip().lower().encode("utf-8")).hexdigest()
+
 
 class TaskGenerationError(Exception):
     """Raised when task generation pipeline completely fails after retry."""
     pass
 
+
 class TaskService:
     """
-    TaskService acts as the core orchestration service for the AI Task Manager.
-    It coordinates the prompt construction, LLM generation, JSON extraction/validation,
-    retry mechanisms, and database persistence layers.
+    Orchestrates the full task-extraction pipeline:
+    hash-check → prompt → LLM → parse → validate → persist.
     """
 
-    def __init__(self, prompt_service: PromptService, llm_manager: LLMManager, repository: TaskRepository):
-        """
-        Initialize TaskService with required dependencies.
-        
-        Args:
-            prompt_service (PromptService): Prompt generation service.
-            llm_manager (LLMManager): LLM manager orchestrating providers.
-            repository (TaskRepository): Database repository for persistence.
-        """
+    def __init__(
+        self,
+        prompt_service: PromptService,
+        llm_manager: LLMManager,
+        repository: TaskRepository,
+    ):
         self.prompt_service = prompt_service
         self.llm_manager = llm_manager
         self.repository = repository
 
-    async def generate_tasks_from_text(self, source_text: str, job_id: Optional[str] = None) -> List[TaskRead]:
+    async def _detect_action_items(self, source_text: str) -> list[dict]:
         """
-        Runs the end-to-end task extraction and validation pipeline.
+        Stage 1 Action Item Detection.
+        Constructs detection prompt, requests LLM, parses/validates output,
+        and applies retry-once strategy on validation or parser errors.
+        """
+        logger.info("TaskService: Stage 1 - Detecting action items")
+        prompt = build_action_item_detection_prompt(source_text)
         
-        Steps:
-        1. Assembles task extraction prompt from raw source text.
-        2. Calls LLMManager to generate raw string output.
-        3. Strips markdown blocks and parses raw string into a Python dict.
-        4. Validates parsed structure against TaskGenerationSchema.
-        5. On parsing/validation failure: Retries the full call once.
-        6. On persistent failure: Raises TaskGenerationError.
-        7. On success: Maps validated models to ORM and saves via repository.
-        
-        Args:
-            source_text (str): Unstructured notes text to extract tasks from.
-            
+        attempts = 2
+        for attempt in range(1, attempts + 1):
+            logger.info(f"TaskService: Stage 1 Attempt {attempt}/{attempts} — calling LLM")
+            try:
+                raw_response = await self.llm_manager.generate(prompt)
+                parsed_data = clean_and_parse_json(raw_response)
+                validated = ActionItemsResponse.model_validate(parsed_data)
+                
+                # Convert list of ActionItem models to list of dicts
+                action_items = [item.model_dump() for item in validated.action_items]
+                return action_items
+                
+            except (AllProvidersFailedError, JSONParsingError, ValidationError) as e:
+                logger.warning(
+                    f"TaskService: Stage 1 Attempt {attempt} failed "
+                    f"({e.__class__.__name__}): {e}"
+                )
+                if attempt < attempts:
+                    logger.info("TaskService: Retrying Stage 1 once")
+                else:
+                    logger.error("TaskService: Stage 1 attempts exhausted.")
+                    raise ActionItemDetectionError(
+                        f"Action item detection failed after {attempts} attempts: {e}"
+                    ) from e
+
+    def _clean_tasks(self, tasks: list[dict]) -> list[dict]:
+        """Run deterministic cleanup on extracted task dicts."""
+        from app.utils.task_cleanup import clean_tasks
+        return clean_tasks(tasks)
+
+    async def generate_tasks_from_text(
+        self, source_text: str, job_id: Optional[str] = None
+    ) -> dict:
+        """
+        Run the end-to-end task extraction pipeline.
+
         Returns:
-            List[TaskRead]: A list of created tasks.
-            
-        Raises:
-            TaskGenerationError: If task extraction fails twice.
+            {
+                "tasks": List[TaskRead],
+                "already_processed": bool   # True when source was seen before
+            }
+
+        Short-circuits without calling the LLM when the SHA-256 hash of the
+        normalised source text already exists in the database, returning the
+        previously-created tasks instead.
+
+        The `already_processed` flag is also embedded in the SSE Completed
+        event message so the frontend can display an appropriate notice.
         """
-        async def _emit(stage: str):
+        async def _emit(stage: str, message: str = ""):
             if job_id:
-                await progress_emitter.emit(job_id, stage)
+                await progress_emitter.emit(job_id, stage, message)
 
         logger.info("TaskService: Starting task generation pipeline")
+        source_hash = _compute_source_hash(source_text)
+        logger.info(f"TaskService: source_hash={source_hash[:12]}…")
 
         try:
-            # 1. Compile the prompt
+            # ── Deduplication check ──────────────────────────────────────────
+            await _emit("Reading File")
+            existing = await self.repository.get_by_source_hash(source_hash)
+            if existing:
+                logger.info(
+                    f"TaskService: source_hash already processed — "
+                    f"returning {len(existing)} cached tasks, skipping LLM."
+                )
+                # Embed already_processed=true in the Completed SSE message
+                # so the frontend can show "already processed" notice.
+                await _emit("Completed", json.dumps({"already_processed": True}))
+                return {"tasks": existing, "already_processed": True}
+
+            # ── New source text — run the full pipeline ──────────────────────
+            await _emit("Detecting Action Items")
+            action_items = await self._detect_action_items(source_text)
+            logger.info(f"Stage 1 detected {len(action_items)} action items from meeting text")
+            
+            if not action_items:
+                logger.info("No action items detected — skipping extraction")
+                await _emit("Completed", json.dumps({"already_processed": False}))
+                return {"tasks": [], "already_processed": False}
+
+            filtered_text = "\n".join([item["sentence"] for item in action_items])
+
+            await _emit("Extracting Text")
             await _emit("Creating Prompt")
-            prompt = self.prompt_service.build_task_extraction_prompt(source_text)
-            logger.info("TaskService: Task extraction prompt created")
+            prompt = self.prompt_service.build_task_extraction_prompt(filtered_text)
+            logger.info("TaskService: Prompt created")
 
             attempts = 2
             validated_schema = None
 
             for attempt in range(1, attempts + 1):
-                logger.info(f"TaskService: Attempt {attempt}/{attempts} - Requesting LLM generate tasks")
+                logger.info(f"TaskService: Attempt {attempt}/{attempts} — calling LLM")
                 try:
-                    # 2. Request LLM generation
                     await _emit("Calling Provider")
                     await _emit("Waiting for Response")
                     raw_response = await self.llm_manager.generate(prompt)
-                    logger.info(f"TaskService: Attempt {attempt} - Raw text generated successfully")
+                    logger.info(f"TaskService: Attempt {attempt} — raw response received")
 
-                    # 3. Clean & Parse JSON
                     await _emit("Parsing JSON")
                     parsed_data = clean_and_parse_json(raw_response)
-                    logger.info(f"TaskService: Attempt {attempt} - JSON text parsed successfully")
+                    logger.info(f"TaskService: Attempt {attempt} — JSON parsed")
 
-                    # 4. Validate against target Pydantic schema
                     await _emit("Validating Output")
                     validated_schema = TaskGenerationSchema.model_validate(parsed_data)
-                    logger.info(f"TaskService: Attempt {attempt} - Pydantic validation successful")
-                    break  # Succeeded, exit retry loop
+                    logger.info(f"TaskService: Attempt {attempt} — validation passed")
+                    break
 
                 except (AllProvidersFailedError, JSONParsingError, ValidationError) as e:
                     logger.warning(
-                        f"TaskService: Attempt {attempt} failed due to {e.__class__.__name__}: {str(e)}"
+                        f"TaskService: Attempt {attempt} failed "
+                        f"({e.__class__.__name__}): {e}"
                     )
                     if attempt < attempts:
-                        logger.info("TaskService: Retrying LLM extraction pipeline once")
+                        logger.info("TaskService: Retrying pipeline once")
                     else:
-                        logger.error("TaskService: Final pipeline attempt failed. Raising TaskGenerationError.")
-                        raise TaskGenerationError(f"Task extraction pipeline failed after {attempts} attempts: {str(e)}") from e
+                        logger.error("TaskService: All attempts exhausted.")
+                        raise TaskGenerationError(
+                            f"Task extraction failed after {attempts} attempts: {e}"
+                        ) from e
 
-            # 5. Persist tasks to the database
+            # ── Cleanup ──────────────────────────────────────────────────────
+            await _emit("Cleaning Tasks")
+            raw_task_dicts = [
+                task_create.model_dump() for task_create in validated_schema.tasks
+            ]
+            stage2_count = len(raw_task_dicts)
+            cleaned_task_dicts = self._clean_tasks(raw_task_dicts)
+            cleanup_removed = stage2_count - len(cleaned_task_dicts)
+
+            logger.info(
+                f"TaskService: Stage 1 detected {len(action_items)} action items | "
+                f"Stage 2 generated {stage2_count} tasks | "
+                f"Cleanup removed {cleanup_removed} tasks | "
+                f"Saving {len(cleaned_task_dicts)} tasks"
+            )
+
+            # ── Persist ──────────────────────────────────────────────────────
             await _emit("Saving Tasks")
-            logger.info("TaskService: Mapping validated JSON schemas to SQLAlchemy ORM models")
             tasks_to_create = []
-            for task_create in validated_schema.tasks:
-                task_create.source_text = source_text
-                orm_task = Task(**task_create.model_dump())
-                tasks_to_create.append(orm_task)
+            for data in cleaned_task_dicts:
+                data["source_text"] = source_text
+                data["source_hash"] = source_hash
+                tasks_to_create.append(Task(**data))
 
-            logger.info(f"TaskService: Persisting {len(tasks_to_create)} tasks via TaskRepository")
+            logger.info(f"TaskService: Persisting {len(tasks_to_create)} tasks")
             created_tasks = await self.repository.bulk_create(tasks_to_create)
-            logger.info("TaskService: Task extraction and persistence complete")
-            await _emit("Completed")
-            return created_tasks
+            logger.info("TaskService: Pipeline complete")
+            await _emit("Completed", json.dumps({"already_processed": False}))
+            return {"tasks": created_tasks, "already_processed": False}
 
-        except Exception as e:
+        except Exception:
             await _emit("Error")
             raise
 
-    # CRUD operations passthroughs
+    # ── CRUD passthroughs ────────────────────────────────────────────────────
+
     async def get_task_by_id(self, task_id: int) -> Optional[TaskRead]:
-        """Retrieve task by ID from the repository."""
         return await self.repository.get_by_id(task_id)
 
     async def list_tasks(self, filters: Optional[dict] = None) -> List[TaskRead]:
-        """Retrieve a list of tasks from the repository applying optional filters."""
         return await self.repository.list(filters)
 
     async def update_task(self, task_id: int, data: TaskUpdate) -> Optional[TaskRead]:
-        """Update task details in the repository."""
         return await self.repository.update(task_id, data)
 
     async def delete_task(self, task_id: int) -> bool:
-        """Delete task by ID from the repository."""
         return await self.repository.delete(task_id)

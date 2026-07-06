@@ -20,6 +20,10 @@ class ProgressEmitter:
         logger.info(f"Registered progress listener for job_id: {job_id}")
         return queue
 
+    def get(self, job_id: str):
+        """Return the existing queue for job_id, or None if not registered."""
+        return self._queues.get(job_id)
+
     async def emit(self, job_id: str, stage: str, message: str = ""):
         """Push a stage update event to the queue associated with the job_id."""
         if job_id in self._queues:

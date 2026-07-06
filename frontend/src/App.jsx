@@ -1,109 +1,229 @@
-import { useState, useEffect } from 'react'
+import { useState, useCallback } from 'react'
+import Navbar from './components/Navbar'
+import InputSection from './components/InputSection'
+import UploadArea from './components/UploadArea'
+import GenerateButton from './components/GenerateButton'
+import ProcessingTimeline from './components/ProcessingTimeline'
+import SummaryCards from './components/SummaryCards'
+import FilterBar from './components/FilterBar'
+import TaskTable from './components/TaskTable'
+import TaskEditModal from './components/TaskEditModal'
+import JsonViewer from './components/JsonViewer'
+import { useTaskGeneration } from './hooks/useTaskGeneration'
+import { useTasks } from './hooks/useTasks'
 
-function App() {
-  const [count, setCount] = useState(0)
-  const [backendStatus, setBackendStatus] = useState('connecting')
+export default function App() {
+  // ── Input state ──────────────────────────────────────────────
+  const [text, setText] = useState('')
+  const [file, setFile] = useState(null)
 
-  useEffect(() => {
-    // Simple fetch to see if the FastAPI server is running
-    fetch('http://localhost:8000/health')
-      .then((res) => {
-        if (res.ok) return res.json()
-        throw new Error('Response not OK')
-      })
-      .then((data) => {
-        if (data.status === 'ok') {
-          setBackendStatus('connected')
-        } else {
-          setBackendStatus('error')
-        }
-      })
-      .catch(() => {
-        setBackendStatus('disconnected')
-      })
+  // ── Workflow visibility state ────────────────────────────────
+  const [showTimeline, setShowTimeline] = useState(false)
+  const [hasGenerated, setHasGenerated] = useState(false)
+  const [editingTask, setEditingTask] = useState(null)
+  const [crudError, setCrudError] = useState(null)
+
+  // ── Task CRUD + filter hook ──────────────────────────────────
+  const {
+    tasks,
+    filters,
+    setFilters,
+    updateTask,
+    deleteTask,
+    reloadTasks,
+    exportJson,
+    fetchError,
+  } = useTasks()
+
+  // ── Generation hook ──────────────────────────────────────────
+  const onCompleted = useCallback(() => {
+    // Source of truth is the database — refetch after pipeline completes
+    reloadTasks()
+    setShowTimeline(false)
+    setHasGenerated(true)
+  }, [reloadTasks])
+
+  const onError = useCallback(() => {
+    setShowTimeline(false)
   }, [])
 
+  const { stages, isGenerating, generateError, generate } = useTaskGeneration({
+    onCompleted,
+    onError,
+  })
+
+  // ── Input handlers ───────────────────────────────────────────
+  function handleTextChange(value) {
+    setText(value)
+    if (value) setFile(null)
+  }
+
+  function handleFileSelect(selectedFile) {
+    setFile(selectedFile)
+    setText('')
+  }
+
+  // ── Generate ─────────────────────────────────────────────────
+  function handleGenerate() {
+    setShowTimeline(true)
+    setHasGenerated(false)
+    generate({ text, file })
+  }
+
+  // ── CRUD handlers ────────────────────────────────────────────
+  async function handleEditSave(updatedTask) {
+    setCrudError(null)
+    try {
+      await updateTask(updatedTask.id, {
+        title: updatedTask.title,
+        description: updatedTask.description,
+        owner: updatedTask.owner,
+        due_date: updatedTask.due_date,
+        priority: updatedTask.priority,
+        status: updatedTask.status,
+      })
+      setEditingTask(null)
+    } catch (err) {
+      setCrudError(err.message)
+    }
+  }
+
+  async function handleDelete(taskId) {
+    setCrudError(null)
+    try {
+      await deleteTask(taskId)
+    } catch (err) {
+      setCrudError(err.message)
+    }
+  }
+
+  const hasInput = text.trim().length > 0 || file !== null
+  const activeError = generateError || fetchError || crudError
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 relative overflow-hidden font-sans">
-      {/* Decorative background glow circles */}
-      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-600/20 rounded-full blur-3xl -z-10 animate-pulse"></div>
-      <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-600/20 rounded-full blur-3xl -z-10 animate-pulse delay-1000"></div>
+    <div className="min-h-screen bg-[#F5F5F5] font-sans">
+      <Navbar />
 
-      <div className="max-w-xl w-full backdrop-blur-md bg-slate-900/60 border border-slate-800 rounded-3xl p-8 shadow-2xl transition-all duration-300 hover:shadow-blue-500/5">
-        
-        {/* Header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 mb-4">
-            <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping"></span>
-            Phase 1 Scaffolding
+      <main className="max-w-6xl mx-auto px-6 py-10 space-y-8">
+
+        {/* ── Error Banner ──────────────────────────────────── */}
+        {activeError && (
+          <div className="flex items-start justify-between gap-4 bg-white border-2 border-red-400 rounded-xl shadow-[4px_4px_0px_#f87171] px-5 py-4">
+            <div className="flex items-start gap-3">
+              <span className="text-red-500 font-black text-base leading-none mt-0.5">✕</span>
+              <p className="text-sm font-bold text-red-600">{activeError}</p>
+            </div>
+            <button
+              onClick={() => { setCrudError(null) }}
+              className="text-xs font-bold text-red-400 hover:text-red-600 transition-colors shrink-0"
+            >
+              Dismiss
+            </button>
           </div>
-          <h1 className="text-4xl font-extrabold tracking-tight bg-gradient-to-r from-blue-400 via-indigo-400 to-purple-400 bg-clip-text text-transparent">
-            AI Task Manager
-          </h1>
-          <p className="mt-2 text-slate-400">
-            Frontend and backend environment successfully initialized.
-          </p>
-        </div>
+        )}
 
-        {/* Project Status Panel */}
-        <div className="space-y-4 mb-8">
-          <div className="flex items-center justify-between p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
-            <span className="text-sm font-medium text-slate-300">Frontend (Vite + React)</span>
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              Active
-            </span>
-          </div>
-
-          <div className="flex items-center justify-between p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
-            <span className="text-sm font-medium text-slate-300">Tailwind CSS (v4)</span>
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              Styled
-            </span>
+        {/* ── Input Section ─────────────────────────────────── */}
+        <section className="space-y-4">
+          <div>
+            <h2 className="text-xl font-black text-black">Generate Tasks</h2>
+            <p className="text-sm text-neutral-500 font-medium mt-0.5">
+              Paste notes or upload a file — AI extracts structured tasks automatically.
+            </p>
           </div>
 
-          <div className="flex items-center justify-between p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
-            <span className="text-sm font-medium text-slate-300">Backend Connection</span>
-            {backendStatus === 'connecting' && (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse">
-                Connecting...
-              </span>
-            )}
-            {backendStatus === 'connected' && (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                Connected
-              </span>
-            )}
-            {backendStatus === 'disconnected' && (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                Disconnected
-              </span>
-            )}
-            {backendStatus === 'error' && (
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
-                Error
-              </span>
-            )}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <InputSection value={text} onChange={handleTextChange} />
+            <UploadArea
+              file={file}
+              onFileSelect={handleFileSelect}
+              onClear={() => setFile(null)}
+            />
           </div>
-        </div>
 
-        {/* Counter Action */}
-        <div className="flex flex-col items-center justify-center p-6 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-800 text-center">
-          <p className="text-sm text-slate-400 mb-3">Verify React State Logic:</p>
-          <button
-            onClick={() => setCount((c) => c + 1)}
-            className="px-6 py-2.5 rounded-xl font-semibold bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white shadow-lg shadow-blue-500/20 hover:shadow-blue-500/30 active:scale-95 transition-all duration-200"
-          >
-            Count is: {count}
-          </button>
-        </div>
+          {(text || file) && (
+            <p className="text-xs text-neutral-400 font-medium">
+              {file
+                ? '📎 File selected — text input is cleared.'
+                : '✏️ Text entered — file upload is cleared.'}
+            </p>
+          )}
 
-      </div>
+          <GenerateButton
+            hasInput={hasInput}
+            isLoading={isGenerating}
+            onGenerate={handleGenerate}
+          />
+        </section>
 
-      <footer className="mt-8 text-center text-xs text-slate-600">
-        AI Task Manager &copy; 2026. Built with FastAPI & Vite React.
-      </footer>
+        {/* ── Processing Timeline ────────────────────────────── */}
+        {showTimeline && (
+          <section className="transition-opacity duration-300 opacity-100">
+            <ProcessingTimeline stages={stages} />
+          </section>
+        )}
+
+        {/* ── Empty state ────────────────────────────────────── */}
+        {!showTimeline && !hasGenerated && (
+          <section className="py-16 text-center">
+            <div className="inline-flex flex-col items-center gap-3">
+              <div className="w-12 h-12 rounded-xl border-2 border-neutral-300 bg-white shadow-[2px_2px_0px_#d4d4d4] flex items-center justify-center">
+                <svg className="w-6 h-6 text-neutral-300" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+              </div>
+              <p className="text-sm font-bold text-neutral-400">No tasks generated yet.</p>
+              <p className="text-xs text-neutral-400 font-medium">
+                Paste meeting notes or upload a document to begin.
+              </p>
+            </div>
+          </section>
+        )}
+
+        {/* ── Results — revealed only after generation completes */}
+        {hasGenerated && (
+          <div className="space-y-8">
+
+            {/* Summary Cards */}
+            <section className="space-y-3">
+              <h2 className="text-base font-black text-black uppercase tracking-wider">Summary</h2>
+              <SummaryCards tasks={tasks} />
+            </section>
+
+            {/* Filter Bar + Task Table */}
+            <section className="space-y-3">
+              <h2 className="text-base font-black text-black uppercase tracking-wider">
+                Tasks
+                <span className="ml-2 text-sm font-bold text-neutral-400 normal-case">
+                  {tasks.length} total
+                </span>
+              </h2>
+              <FilterBar
+                filters={filters}
+                onFilterChange={setFilters}
+                onClearFilters={() => setFilters({ owner: '', priority: '', status: '' })}
+              />
+              <TaskTable
+                tasks={tasks}
+                onEdit={setEditingTask}
+                onDelete={handleDelete}
+              />
+            </section>
+
+            {/* JSON Viewer — Download delegates to backend export endpoint */}
+            <section>
+              <JsonViewer tasks={tasks} onExport={exportJson} />
+            </section>
+
+          </div>
+        )}
+      </main>
+
+      {/* Edit Modal */}
+      <TaskEditModal
+        task={editingTask}
+        onSave={handleEditSave}
+        onClose={() => setEditingTask(null)}
+      />
     </div>
   )
 }
-
-export default App

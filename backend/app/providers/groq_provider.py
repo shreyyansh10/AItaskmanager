@@ -29,7 +29,12 @@ class GroqProvider(LLMProvider):
             "messages": [
                 {"role": "user", "content": prompt}
             ],
+            # temperature=0 + top_p=1 + seed forces deterministic output.
+            # Task extraction is structured-data work, not creative generation;
+            # identical inputs must produce identical outputs for user trust.
             "temperature": 0.0,
+            "top_p": 1.0,
+            "seed": 42,
         }
 
         start_time = time.perf_counter()

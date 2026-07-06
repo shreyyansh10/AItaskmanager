@@ -56,7 +56,7 @@ AItaskmanager/
    ```bash
    uvicorn app.main:app --reload
    ```
-6. Verify the server is running by visiting: [http://localhost:8000/health](http://localhost:8000/health)
+6. Verify the server is running by visiting: [http://localhost:8001/health](http://localhost:8001/health)
 
 ### 2. Frontend Setup (Vite + React)
 

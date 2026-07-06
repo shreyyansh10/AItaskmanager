@@ -9,3 +9,6 @@ ENV/
 env.bak/
 venv.bak/
 *.db
+# Runtime logs
+*.log
+uvicorn.log

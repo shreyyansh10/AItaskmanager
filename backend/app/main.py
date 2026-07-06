@@ -9,6 +9,7 @@ from app.models.task import Task  # Import to register model metadata
 from app.utils.text_extraction import UnsupportedFileTypeError
 from app.services.task_service import TaskGenerationError
 from app.services.llm_manager import AllProvidersFailedError
+from app.services.exceptions import ActionItemDetectionError
 import logging
 
 setup_logging()
@@ -19,6 +20,9 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Initializing database and creating tables...")
     async with engine.begin() as conn:
+        # SQLite + create_all() does not apply schema migrations to existing tables.
+        # Any future column additions require either deleting the dev DB or introducing
+        # a migration tool (e.g. Alembic) for production use.
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database initialized successfully.")
     yield
@@ -31,7 +35,7 @@ app = FastAPI(title="AI Task Manager API", version="0.1.0", lifespan=lifespan)
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://127.0.0.1:5174", "http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,6 +50,11 @@ async def unsupported_file_type_handler(request: Request, exc: UnsupportedFileTy
 
 @app.exception_handler(TaskGenerationError)
 async def task_generation_error_handler(request: Request, exc: TaskGenerationError):
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
+@app.exception_handler(ActionItemDetectionError)
+async def action_item_detection_error_handler(request: Request, exc: ActionItemDetectionError):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
