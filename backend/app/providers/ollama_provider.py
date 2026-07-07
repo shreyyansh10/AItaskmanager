@@ -11,7 +11,7 @@ class OllamaProvider(LLMProvider):
     Uses direct HTTP requests to Ollama generation API.
     """
 
-    def __init__(self, base_url: str = "http://localhost:11434", model_name: str = "llama3", timeout: float = 30.0):
+    def __init__(self, base_url: str, model_name: str = "llama3", timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
         self.timeout = timeout

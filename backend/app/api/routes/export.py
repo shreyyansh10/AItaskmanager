@@ -22,7 +22,13 @@ def get_task_service(db: AsyncSession = Depends(get_db)) -> TaskService:
         providers.append(GroqProvider(api_key=settings.GROQ_API_KEY))
     if settings.GEMINI_API_KEY:
         providers.append(GeminiProvider(api_key=settings.GEMINI_API_KEY))
-    providers.append(OllamaProvider(base_url=settings.OLLAMA_BASE_URL))
+    if settings.OLLAMA_BASE_URL and settings.OLLAMA_MODEL_NAME:
+        providers.append(
+            OllamaProvider(
+                base_url=settings.OLLAMA_BASE_URL,
+                model_name=settings.OLLAMA_MODEL_NAME,
+            )
+        )
     return TaskService(
         prompt_service=PromptService(),
         llm_manager=LLMManager(providers=providers),

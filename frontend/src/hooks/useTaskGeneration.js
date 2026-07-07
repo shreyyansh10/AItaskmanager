@@ -139,9 +139,14 @@ export function useTaskGeneration({ onCompleted, onError }) {
       })
       jobId = data.job_id
     } catch (err) {
-      const detail =
-        err?.response?.data?.detail ||
-        'Generation failed. Ensure the backend is running and a provider is configured.'
+      console.log(err)
+console.log(err.response)
+console.log(err.response?.data)
+
+const detail =
+  err?.response?.data?.detail ||
+  err?.message ||
+  'Unknown error'
       setGenerateError(detail)
       setIsGenerating(false)
       onErrorRef.current?.(detail)
