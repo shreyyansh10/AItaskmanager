@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import Navbar from './components/Navbar'
 import InputSection from './components/InputSection'
 import UploadArea from './components/UploadArea'
@@ -17,11 +17,15 @@ export default function App() {
   const [text, setText] = useState('')
   const [file, setFile] = useState(null)
 
-  // ── Workflow visibility state ────────────────────────────────
-  const [showTimeline, setShowTimeline] = useState(false)
+  // ── Workflow state ───────────────────────────────────────────
+  const [showModal, setShowModal] = useState(false)
   const [hasGenerated, setHasGenerated] = useState(false)
   const [editingTask, setEditingTask] = useState(null)
   const [crudError, setCrudError] = useState(null)
+
+  // Ref to scroll results into view after generation
+  const resultsRef = useRef(null)
+  const submittedSourceTextRef = useRef('')
 
   // ── Task CRUD + filter hook ──────────────────────────────────
   const {
@@ -30,21 +34,35 @@ export default function App() {
     setFilters,
     updateTask,
     deleteTask,
+    setCurrentTasks,
     reloadTasks,
+    reloadTasksForSourceText,
     exportJson,
     fetchError,
   } = useTasks()
 
   // ── Generation hook ──────────────────────────────────────────
-  const onCompleted = useCallback(() => {
-    // Source of truth is the database — refetch after pipeline completes
-    reloadTasks()
-    setShowTimeline(false)
+  const onCompleted = useCallback((newTasks) => {
+    if (newTasks && newTasks.length > 0) {
+      // Show only the tasks produced by this generation run
+      setCurrentTasks(newTasks)
+    } else if (submittedSourceTextRef.current) {
+      // Fallback for completions that do not carry task payloads: reload only
+      // the rows that belong to the submitted source text.
+      reloadTasksForSourceText(submittedSourceTextRef.current)
+    } else {
+      // already_processed or empty result — reload from DB
+      reloadTasks()
+    }
+    setShowModal(false)
     setHasGenerated(true)
-  }, [reloadTasks])
+    setTimeout(() => {
+      resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 150)
+  }, [reloadTasks, reloadTasksForSourceText, setCurrentTasks])
 
   const onError = useCallback(() => {
-    setShowTimeline(false)
+    setShowModal(false)
   }, [])
 
   const { stages, isGenerating, generateError, generate } = useTaskGeneration({
@@ -65,7 +83,8 @@ export default function App() {
 
   // ── Generate ─────────────────────────────────────────────────
   function handleGenerate() {
-    setShowTimeline(true)
+    submittedSourceTextRef.current = text.trim()
+    setShowModal(true)
     setHasGenerated(false)
     generate({ text, file })
   }
@@ -104,7 +123,10 @@ export default function App() {
     <div className="min-h-screen bg-[#F5F5F5] font-sans">
       <Navbar />
 
-      <main className="max-w-6xl mx-auto px-6 py-10 space-y-8">
+      {/* Processing modal — rendered at root level, always centered */}
+      <ProcessingTimeline stages={stages} visible={showModal} />
+
+      <main className="max-w-[1600px] mx-auto px-6 py-8 space-y-7">
 
         {/* ── Error Banner ──────────────────────────────────── */}
         {activeError && (
@@ -114,7 +136,7 @@ export default function App() {
               <p className="text-sm font-bold text-red-600">{activeError}</p>
             </div>
             <button
-              onClick={() => { setCrudError(null) }}
+              onClick={() => setCrudError(null)}
               className="text-xs font-bold text-red-400 hover:text-red-600 transition-colors shrink-0"
             >
               Dismiss
@@ -127,7 +149,7 @@ export default function App() {
           <div>
             <h2 className="text-xl font-black text-black">Generate Tasks</h2>
             <p className="text-sm text-neutral-500 font-medium mt-0.5">
-              Paste notes or upload a file — AI extracts structured tasks automatically.
+              Paste meeting notes or upload a file — AI extracts structured tasks automatically.
             </p>
           </div>
 
@@ -155,16 +177,9 @@ export default function App() {
           />
         </section>
 
-        {/* ── Processing Timeline ────────────────────────────── */}
-        {showTimeline && (
-          <section className="transition-opacity duration-300 opacity-100">
-            <ProcessingTimeline stages={stages} />
-          </section>
-        )}
-
         {/* ── Empty state ────────────────────────────────────── */}
-        {!showTimeline && !hasGenerated && (
-          <section className="py-16 text-center">
+        {!hasGenerated && (
+          <section className="py-14 text-center">
             <div className="inline-flex flex-col items-center gap-3">
               <div className="w-12 h-12 rounded-xl border-2 border-neutral-300 bg-white shadow-[2px_2px_0px_#d4d4d4] flex items-center justify-center">
                 <svg className="w-6 h-6 text-neutral-300" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -179,39 +194,52 @@ export default function App() {
           </section>
         )}
 
-        {/* ── Results — revealed only after generation completes */}
+        {/* ── Results ───────────────────────────────────────── */}
         {hasGenerated && (
-          <div className="space-y-8">
+          <div ref={resultsRef} className="space-y-5">
 
             {/* Summary Cards */}
             <section className="space-y-3">
-              <h2 className="text-base font-black text-black uppercase tracking-wider">Summary</h2>
+              <h2 className="text-sm font-black text-black uppercase tracking-wider">Summary</h2>
               <SummaryCards tasks={tasks} />
             </section>
 
-            {/* Filter Bar + Task Table */}
-            <section className="space-y-3">
-              <h2 className="text-base font-black text-black uppercase tracking-wider">
-                Tasks
-                <span className="ml-2 text-sm font-bold text-neutral-400 normal-case">
-                  {tasks.length} total
-                </span>
-              </h2>
-              <FilterBar
-                filters={filters}
-                onFilterChange={setFilters}
-                onClearFilters={() => setFilters({ owner: '', priority: '', status: '' })}
-              />
-              <TaskTable
-                tasks={tasks}
-                onEdit={setEditingTask}
-                onDelete={handleDelete}
-              />
-            </section>
+            {/* Filter Bar */}
+            <FilterBar
+              filters={filters}
+              onFilterChange={setFilters}
+              onClearFilters={() => setFilters({ owner: '', priority: '', status: '' })}
+            />
 
-            {/* JSON Viewer — Download delegates to backend export endpoint */}
+            {/* Task Table + JSON side by side */}
             <section>
-              <JsonViewer tasks={tasks} onExport={exportJson} />
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-black text-black uppercase tracking-wider">
+                  Tasks
+                  <span className="ml-2 text-sm font-bold text-neutral-400 normal-case">
+                    {tasks.length} total
+                  </span>
+                </h2>
+              </div>
+
+              {/* Side-by-side: table 65% / JSON 35% on large screens, stacked on tablet/mobile */}
+              <div className="flex flex-col xl:flex-row gap-4 items-start">
+
+                {/* Task Table — 65% */}
+                <div className="w-full xl:w-[65%] min-w-0">
+                  <TaskTable
+                    tasks={tasks}
+                    onEdit={setEditingTask}
+                    onDelete={handleDelete}
+                  />
+                </div>
+
+                {/* JSON Viewer — 35%, fixed height matching table */}
+                <div className="w-full xl:w-[35%] xl:sticky xl:top-4" style={{ height: '560px' }}>
+                  <JsonViewer tasks={tasks} onExport={exportJson} />
+                </div>
+
+              </div>
             </section>
 
           </div>

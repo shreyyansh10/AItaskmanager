@@ -33,13 +33,38 @@ export function useTasks() {
     }
   }, [])
 
-  // Called by App after generation completes — triggers first load and marks initialized
+  // Called by App to inject just-generated tasks directly (no DB fetch)
+  const setCurrentTasks = useCallback((newTasks) => {
+    initializedRef.current = true
+    setTasks(newTasks)
+  }, [])
+
+  // Called by App for already_processed case — fetches all tasks from DB
   const reloadTasks = useCallback(() => {
     initializedRef.current = true
     fetchTasks(filters)
   }, [filters, fetchTasks])
 
-  // Debounced filter refetch — only runs after first reloadTasks() call
+  const reloadTasksForSourceText = useCallback(async (sourceText) => {
+    initializedRef.current = true
+    setIsLoading(true)
+    setFetchError(null)
+    try {
+      const normalizedSourceText = sourceText.trim().toLowerCase()
+      const { data } = await client.get('/tasks')
+      setTasks(
+        data.filter((task) =>
+          (task.source_text || '').trim().toLowerCase() === normalizedSourceText
+        )
+      )
+    } catch (err) {
+      setFetchError(err?.response?.data?.detail || 'Failed to load tasks.')
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  // Debounced filter refetch — only runs after initialized
   const applyFilters = useCallback((newFilters) => {
     setFilters(newFilters)
     if (!initializedRef.current) return
@@ -80,6 +105,8 @@ export function useTasks() {
     updateTask,
     deleteTask,
     reloadTasks,
+    reloadTasksForSourceText,
+    setCurrentTasks,
     exportJson,
   }
 }

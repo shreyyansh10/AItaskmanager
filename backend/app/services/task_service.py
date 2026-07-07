@@ -19,9 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _compute_source_hash(text: str) -> str:
-    """SHA-256 hex digest of normalised source text (stripped + lowercased).
-    Normalisation is for hashing only — original casing is preserved in storage.
-    """
+    """SHA-256 hex digest of normalised source text (stripped + lowercased)."""
     return hashlib.sha256(text.strip().lower().encode("utf-8")).hexdigest()
 
 
@@ -54,7 +52,7 @@ class TaskService:
         """
         logger.info("TaskService: Stage 1 - Detecting action items")
         prompt = build_action_item_detection_prompt(source_text)
-        
+
         attempts = 2
         for attempt in range(1, attempts + 1):
             logger.info(f"TaskService: Stage 1 Attempt {attempt}/{attempts} — calling LLM")
@@ -62,11 +60,9 @@ class TaskService:
                 raw_response = await self.llm_manager.generate(prompt)
                 parsed_data = clean_and_parse_json(raw_response)
                 validated = ActionItemsResponse.model_validate(parsed_data)
-                
-                # Convert list of ActionItem models to list of dicts
                 action_items = [item.model_dump() for item in validated.action_items]
                 return action_items
-                
+
             except (AllProvidersFailedError, JSONParsingError, ValidationError) as e:
                 logger.warning(
                     f"TaskService: Stage 1 Attempt {attempt} failed "
@@ -94,15 +90,12 @@ class TaskService:
         Returns:
             {
                 "tasks": List[TaskRead],
-                "already_processed": bool   # True when source was seen before
+                "already_processed": bool
             }
 
-        Short-circuits without calling the LLM when the SHA-256 hash of the
-        normalised source text already exists in the database, returning the
-        previously-created tasks instead.
-
-        The `already_processed` flag is also embedded in the SSE Completed
-        event message so the frontend can display an appropriate notice.
+        The Completed SSE message embeds the full task list as JSON so the
+        frontend can display only the current generation's output without
+        fetching all tasks from the database.
         """
         async def _emit(stage: str, message: str = ""):
             if job_id:
@@ -110,30 +103,33 @@ class TaskService:
 
         logger.info("TaskService: Starting task generation pipeline")
         source_hash = _compute_source_hash(source_text)
-        logger.info(f"TaskService: source_hash={source_hash[:12]}…")
 
         try:
             # ── Deduplication check ──────────────────────────────────────────
             await _emit("Reading File")
             existing = await self.repository.get_by_source_hash(source_hash)
+            logger.info(f"TaskService: duplicate check={bool(existing)} hash={source_hash[:12]}…")
+
             if existing:
                 logger.info(
                     f"TaskService: source_hash already processed — "
                     f"returning {len(existing)} cached tasks, skipping LLM."
                 )
-                # Embed already_processed=true in the Completed SSE message
-                # so the frontend can show "already processed" notice.
-                await _emit("Completed", json.dumps({"already_processed": True}))
+                payload = json.dumps({
+                    "already_processed": True,
+                    "tasks": [t.model_dump(mode="json") for t in existing],
+                })
+                await _emit("Completed", payload)
                 return {"tasks": existing, "already_processed": True}
 
             # ── New source text — run the full pipeline ──────────────────────
             await _emit("Detecting Action Items")
             action_items = await self._detect_action_items(source_text)
-            logger.info(f"Stage 1 detected {len(action_items)} action items from meeting text")
-            
+            logger.info(f"TaskService: Stage 1 detected {len(action_items)} action items")
+
             if not action_items:
                 logger.info("No action items detected — skipping extraction")
-                await _emit("Completed", json.dumps({"already_processed": False}))
+                await _emit("Completed", json.dumps({"already_processed": False, "tasks": []}))
                 return {"tasks": [], "already_processed": False}
 
             filtered_text = "\n".join([item["sentence"] for item in action_items])
@@ -141,7 +137,6 @@ class TaskService:
             await _emit("Extracting Text")
             await _emit("Creating Prompt")
             prompt = self.prompt_service.build_task_extraction_prompt(filtered_text)
-            logger.info("TaskService: Prompt created")
 
             attempts = 2
             validated_schema = None
@@ -152,11 +147,9 @@ class TaskService:
                     await _emit("Calling Provider")
                     await _emit("Waiting for Response")
                     raw_response = await self.llm_manager.generate(prompt)
-                    logger.info(f"TaskService: Attempt {attempt} — raw response received")
 
                     await _emit("Parsing JSON")
                     parsed_data = clean_and_parse_json(raw_response)
-                    logger.info(f"TaskService: Attempt {attempt} — JSON parsed")
 
                     await _emit("Validating Output")
                     validated_schema = TaskGenerationSchema.model_validate(parsed_data)
@@ -183,13 +176,11 @@ class TaskService:
             ]
             stage2_count = len(raw_task_dicts)
             cleaned_task_dicts = self._clean_tasks(raw_task_dicts)
-            cleanup_removed = stage2_count - len(cleaned_task_dicts)
-
             logger.info(
-                f"TaskService: Stage 1 detected {len(action_items)} action items | "
-                f"Stage 2 generated {stage2_count} tasks | "
-                f"Cleanup removed {cleanup_removed} tasks | "
-                f"Saving {len(cleaned_task_dicts)} tasks"
+                f"TaskService: Stage 1={len(action_items)} action items | "
+                f"Stage 2={stage2_count} tasks | "
+                f"cleanup removed={stage2_count - len(cleaned_task_dicts)} | "
+                f"saving={len(cleaned_task_dicts)}"
             )
 
             # ── Persist ──────────────────────────────────────────────────────
@@ -200,10 +191,14 @@ class TaskService:
                 data["source_hash"] = source_hash
                 tasks_to_create.append(Task(**data))
 
-            logger.info(f"TaskService: Persisting {len(tasks_to_create)} tasks")
             created_tasks = await self.repository.bulk_create(tasks_to_create)
-            logger.info("TaskService: Pipeline complete")
-            await _emit("Completed", json.dumps({"already_processed": False}))
+            logger.info(f"TaskService: Pipeline complete — {len(created_tasks)} tasks saved")
+
+            payload = json.dumps({
+                "already_processed": False,
+                "tasks": [t.model_dump(mode="json") for t in created_tasks],
+            })
+            await _emit("Completed", payload)
             return {"tasks": created_tasks, "already_processed": False}
 
         except Exception:
