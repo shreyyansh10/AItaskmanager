@@ -281,8 +281,7 @@ Computer Engineering Undergraduate · Full-Stack Developer · Aspiring AI Engine
 
 I built this project to demonstrate not just that I can call an LLM API, but that I can **design the system around it properly** — with the reliability, observability, and architectural discipline that separates a working demo from something a team could actually maintain in production. I'd welcome the chance to talk through any part of this design in more depth.
 
-[GitHub](https://github.com/shreyyansh10) · [LinkedIn](https://linkedin.com/shreyansh-pipaliya<img width="1376" height="2192" alt="diagram-export-7-7-2026-4_25_15-PM" src="https://github.com/user-attachments/assets/8b5ed0c2-78cd-4373-b834-5de4af70696e" />
-)
+[GitHub](https://github.com/shreyyansh10) · [LinkedIn](https://linkedin.com/shreyansh-pipaliya)
 
 ---
 
