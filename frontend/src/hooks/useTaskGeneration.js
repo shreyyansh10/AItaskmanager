@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import client from '../api/client'
+import { buildApiUrl } from '../api/apiUrl'
 
 const STAGE_NAMES = [
   'Reading File',
@@ -151,8 +152,7 @@ export function useTaskGeneration({ onCompleted, onError }) {
     workerActiveRef.current = true
     runWorker()
 
-    const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:8001'
-    const es = new EventSource(`${baseURL}/progress/${jobId}`)
+    const es = new EventSource(buildApiUrl(`/progress/${jobId}`))
     esRef.current = es
 
     es.onmessage = (e) => {

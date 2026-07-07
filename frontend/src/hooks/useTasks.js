@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
 import client from '../api/client'
+import { buildApiUrl } from '../api/apiUrl'
 
 const DEBOUNCE_MS = 400
 
@@ -92,8 +93,7 @@ export function useTasks() {
   }, [])
 
   const exportJson = useCallback(() => {
-    const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:8001'
-    window.open(`${baseURL}/tasks/export/json`, '_blank')
+    window.open(buildApiUrl('/tasks/export/json'), '_blank')
   }, [])
 
   return {
